@@ -21,7 +21,7 @@ import { bridgeOpencodeMcp, type RuntimeMcpStatus } from "./mcp-bridge.js"
 import {
   getRuntimeMcpStatus,
   fetchOpencodeToolList,
-  resolveSpawnCwd,
+  resolveSpawnCwdForSession,
 } from "./runtime-status.js"
 import {
   getActiveProcess,
@@ -962,9 +962,9 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
     options: LanguageModelV3CallOptions,
   ): Promise<Awaited<ReturnType<LanguageModelV3["doGenerate"]>>> {
     const warnings: SharedV3Warning[] = []
-    const cwd = resolveSpawnCwd(this.config.cwd)
     const scope = this.requestScope(options as any)
     const affinity = this.sessionAffinity(options)
+    const cwd = await resolveSpawnCwdForSession(this.config.cwd, affinity)
     const sk = sessionKey(cwd, `${this.modelId}::${scope}::${affinity}`)
 
     // When selective proxying is enabled, doGenerate must not bypass the
@@ -1393,11 +1393,11 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
     options: LanguageModelV3CallOptions,
   ): Promise<Awaited<ReturnType<LanguageModelV3["doStream"]>>> {
     const warnings: SharedV3Warning[] = []
-    const cwd = resolveSpawnCwd(this.config.cwd)
     const cliPath = this.config.cliPath
     const skipPermissions = this.config.skipPermissions !== false
     const scope = this.requestScope(options as any)
     const affinity = this.sessionAffinity(options)
+    const cwd = await resolveSpawnCwdForSession(this.config.cwd, affinity)
     const compactionMode = this.isCompactionCall(options)
     // Use a separate session key for compaction so its short-lived spawn
     // never collides with the main conversation's claude process.
