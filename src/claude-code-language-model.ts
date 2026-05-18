@@ -40,9 +40,11 @@ import { detectCliVersion } from "./cli-version.js"
 import {
   createProxyMcpServer,
   disallowedToolFlags,
+  resolveProxyCallTimeoutMs,
   DEFAULT_PROXY_TOOLS,
   PROXY_TOOL_PREFIX,
   type ProxyMcpServer,
+  type ProxyTimeoutConfig,
   type ProxyToolCall,
   type ProxyToolDef,
   type ProxyToolResult,
@@ -563,9 +565,20 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
     tools: ProxyToolDef[],
     sessionKeyForCalls: string,
   ): Promise<ProxyMcpServer> {
-    const srv = await createProxyMcpServer(tools)
+    const timeoutCfg: ProxyTimeoutConfig = {
+      defaultMs: this.config.proxyCallTimeoutMs,
+      byToolMs: this.config.proxyCallTimeoutMsByTool,
+    }
+    const srv = await createProxyMcpServer(tools, timeoutCfg)
     srv.calls.on("call", (call: ProxyToolCall) => {
-      queuePendingProxyCall(sessionKeyForCalls, call)
+      // Resolve the same per-tool cap the proxy-mcp HTTP handler used, so
+      // the broker's guard timer doesn't fire earlier than the HTTP one
+      // (they gate the same logical call; the lower wins).
+      queuePendingProxyCall(
+        sessionKeyForCalls,
+        call,
+        resolveProxyCallTimeoutMs(call.toolName, timeoutCfg),
+      )
     })
     return srv
   }

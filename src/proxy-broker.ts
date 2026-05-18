@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events"
 import type { ProxyToolCall, ProxyToolResult } from "./proxy-mcp.js"
+import { DEFAULT_PROXY_CALL_TIMEOUT_MS } from "./proxy-mcp.js"
 import { log } from "./logger.js"
 
 export interface PendingProxyCall {
@@ -11,7 +12,7 @@ export interface PendingProxyCall {
 
 type InternalPending = PendingProxyCall & {
   createdAt: number
-  timer: ReturnType<typeof setTimeout>
+  timer: ReturnType<typeof setTimeout> | null
   resolve(result: ProxyToolResult): void
   reject(error: Error): void
 }
@@ -24,7 +25,6 @@ const pendingByCallId = new Map<string, InternalPending>()
 const callIdsBySession = new Map<string, Set<string>>()
 
 const emitter = new EventEmitter()
-const PENDING_PROXY_CALL_TIMEOUT_MS = 10 * 60 * 1000
 
 function eventName(sessionKey: string) {
   return `pending:${sessionKey}`
@@ -58,13 +58,18 @@ export function onPendingProxyCall(
 export function queuePendingProxyCall(
   sessionKey: string,
   call: ProxyToolCall,
+  // Per-call wait cap (already resolved per-tool by the caller via
+  // resolveProxyCallTimeoutMs). Omitted → the default 10-min cap, so
+  // existing callers/tests keep their exact prior behavior. <= 0 → no
+  // cap (rely on session-lifecycle cleanup); used for long subagent runs.
+  timeoutMs: number = DEFAULT_PROXY_CALL_TIMEOUT_MS,
 ): PendingProxyCall {
   // Defensive: if this exact callId is somehow already pending (UUID
   // collision or retry storm), replace it cleanly so we never leak two
   // entries for the same id.
   const previous = pendingByCallId.get(call.id)
   if (previous) {
-    clearTimeout(previous.timer)
+    if (previous.timer) clearTimeout(previous.timer)
     previous.reject(
       new Error(`Replaced pending proxy call ${call.id} with a fresh one`),
     )
@@ -72,26 +77,29 @@ export function queuePendingProxyCall(
     indexRemove(previous.sessionKey, call.id)
   }
 
-  const timer = setTimeout(() => {
-    const current = pendingByCallId.get(call.id)
-    if (!current) return
-    pendingByCallId.delete(call.id)
-    indexRemove(current.sessionKey, call.id)
-    current.reject(
-      new Error(
-        `Proxy tool call '${call.toolName}' timed out after ${PENDING_PROXY_CALL_TIMEOUT_MS}ms waiting for opencode to resolve the call`,
-      ),
-    )
-    // v0.4.13: demoted from warn to notice. AFK-permission-pending
-    // sessions can stack many of these; demoting keeps the UI quiet on
-    // return while preserving the audit trail in plugin.log.
-    log.notice("timed out pending proxy call", {
-      sessionKey: current.sessionKey,
-      toolCallId: call.id,
-      toolName: call.toolName,
-      timeoutMs: PENDING_PROXY_CALL_TIMEOUT_MS,
-    })
-  }, PENDING_PROXY_CALL_TIMEOUT_MS)
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          const current = pendingByCallId.get(call.id)
+          if (!current) return
+          pendingByCallId.delete(call.id)
+          indexRemove(current.sessionKey, call.id)
+          current.reject(
+            new Error(
+              `Proxy tool call '${call.toolName}' timed out after ${timeoutMs}ms waiting for opencode to resolve the call`,
+            ),
+          )
+          // v0.4.13: demoted from warn to notice. AFK-permission-pending
+          // sessions can stack many of these; demoting keeps the UI quiet on
+          // return while preserving the audit trail in plugin.log.
+          log.notice("timed out pending proxy call", {
+            sessionKey: current.sessionKey,
+            toolCallId: call.id,
+            toolName: call.toolName,
+            timeoutMs,
+          })
+        }, timeoutMs)
+      : null
 
   const pending: InternalPending = {
     sessionKey,
@@ -133,7 +141,7 @@ export function resolvePendingProxyCallById(
   if (!pending) return false
   pendingByCallId.delete(toolCallId)
   indexRemove(pending.sessionKey, toolCallId)
-  clearTimeout(pending.timer)
+  if (pending.timer) clearTimeout(pending.timer)
   pending.resolve(result)
   log.info("resolved pending proxy call", {
     sessionKey: pending.sessionKey,
@@ -151,7 +159,7 @@ export function rejectPendingProxyCallById(
   if (!pending) return false
   pendingByCallId.delete(toolCallId)
   indexRemove(pending.sessionKey, toolCallId)
-  clearTimeout(pending.timer)
+  if (pending.timer) clearTimeout(pending.timer)
   pending.reject(error)
   // Rejection is the broker's cleanup mechanism — fires on timeouts, orphans,
   // stream closes, etc. None are user-actionable. File-log them at NOTICE so
