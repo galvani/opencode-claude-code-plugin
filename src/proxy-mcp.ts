@@ -54,11 +54,56 @@ const SERVER_NAME = "opencode_proxy"
 export const PROXY_TOOL_PREFIX = `mcp__${SERVER_NAME}__`
 
 // Cap on how long a proxy tool call may wait for opencode to resolve it.
-// Matches Claude CLI's hard upper bound for Bash (10 min). Without this the
-// HTTP handler waits forever if the broker chain breaks (listener never
-// attaches, opencode crashes between turns, etc.) and the Claude
-// subprocess sits idle waiting for a tool result that never arrives.
-const PROXY_CALL_TIMEOUT_MS = 10 * 60 * 1000
+// This is a *hang guard* — it only matters when the broker chain breaks
+// (listener never attaches, opencode crashes between turns) so the Claude
+// subprocess doesn't sit idle forever. It is NOT a task-duration budget.
+//
+// The default matches Claude CLI's own 10-min Bash ceiling, but `task`
+// (subagent dispatch) legitimately runs far longer than a shell command,
+// so it gets a much larger default. Both are overridable per provider via
+// `proxyCallTimeoutMs` (global) and `proxyCallTimeoutMsByTool` (per-tool);
+// a value <= 0 disables the cap entirely for that tool.
+export const DEFAULT_PROXY_CALL_TIMEOUT_MS = 10 * 60 * 1000
+
+export const DEFAULT_PROXY_CALL_TIMEOUT_MS_BY_TOOL: Record<string, number> = {
+  // A proxied subagent run is unbounded in principle; 60 min keeps a hang
+  // guard without amputating real work at 10 min. Set `{ task: 0 }` in
+  // `proxyCallTimeoutMsByTool` to remove the cap completely.
+  task: 60 * 60 * 1000,
+}
+
+export interface ProxyTimeoutConfig {
+  /** Global override for every proxied tool's wait cap, in ms. */
+  defaultMs?: number
+  /** Per-tool override, keyed by bare proxy tool name (e.g. "task"). */
+  byToolMs?: Record<string, number>
+}
+
+/**
+ * Resolve the effective wait cap (ms) for a proxied tool call. Priority:
+ * per-tool config → global config → built-in per-tool default → built-in
+ * default. A result <= 0 means "no timeout" (caller must not arm a timer).
+ * Tool names are normalised (lowercased, `mcp__opencode_proxy__` prefix
+ * stripped) so callers can pass either the bare or prefixed name.
+ */
+export function resolveProxyCallTimeoutMs(
+  toolName: string,
+  cfg?: ProxyTimeoutConfig,
+): number {
+  const key = (toolName || "")
+    .toLowerCase()
+    .replace(new RegExp(`^${PROXY_TOOL_PREFIX}`), "")
+  const byTool = cfg?.byToolMs
+  if (byTool) {
+    for (const [k, v] of Object.entries(byTool)) {
+      if (k.toLowerCase() === key && typeof v === "number") return v
+    }
+  }
+  if (typeof cfg?.defaultMs === "number") return cfg.defaultMs
+  if (key in DEFAULT_PROXY_CALL_TIMEOUT_MS_BY_TOOL)
+    return DEFAULT_PROXY_CALL_TIMEOUT_MS_BY_TOOL[key]
+  return DEFAULT_PROXY_CALL_TIMEOUT_MS
+}
 
 export const DEFAULT_PROXY_TOOLS: ProxyToolDef[] = [
   {
@@ -202,6 +247,7 @@ export const DEFAULT_PROXY_TOOLS: ProxyToolDef[] = [
 
 export async function createProxyMcpServer(
   tools: ProxyToolDef[] = DEFAULT_PROXY_TOOLS,
+  timeoutConfig?: ProxyTimeoutConfig,
 ): Promise<ProxyMcpServer> {
   const calls = new EventEmitter()
   const pending = new Map<string, ProxyToolCall>()
@@ -296,6 +342,7 @@ export async function createProxyMcpServer(
           hasInput: input != null,
         })
 
+        const timeoutMs = resolveProxyCallTimeoutMs(toolName, timeoutConfig)
         let timer: ReturnType<typeof setTimeout> | null = null
         const result = await new Promise<ProxyToolResult>(
           (resolve, reject) => {
@@ -307,24 +354,29 @@ export async function createProxyMcpServer(
               reject,
             }
             pending.set(callId, entry)
-            timer = setTimeout(() => {
-              if (!pending.has(callId)) return
-              pending.delete(callId)
-              // v0.4.13: demoted from warn to notice. Timeouts are usually
-              // permission-pending while the user is AFK — surfacing each as
-              // a yellow UI bubble produces a wall of noise on return. The
-              // file log still captures the event for diagnostics.
-              log.notice("proxy-mcp tool call timed out", {
-                callId,
-                toolName,
-                timeoutMs: PROXY_CALL_TIMEOUT_MS,
-              })
-              reject(
-                new Error(
-                  `Proxy tool '${toolName}' timed out after ${PROXY_CALL_TIMEOUT_MS}ms waiting for opencode to resolve the call`,
-                ),
-              )
-            }, PROXY_CALL_TIMEOUT_MS)
+            // timeoutMs <= 0 means "no cap" (e.g. long subagent runs) —
+            // skip the timer entirely and rely on session-lifecycle
+            // cleanup to reclaim the call when the Claude process ends.
+            if (timeoutMs > 0) {
+              timer = setTimeout(() => {
+                if (!pending.has(callId)) return
+                pending.delete(callId)
+                // v0.4.13: demoted from warn to notice. Timeouts are usually
+                // permission-pending while the user is AFK — surfacing each as
+                // a yellow UI bubble produces a wall of noise on return. The
+                // file log still captures the event for diagnostics.
+                log.notice("proxy-mcp tool call timed out", {
+                  callId,
+                  toolName,
+                  timeoutMs,
+                })
+                reject(
+                  new Error(
+                    `Proxy tool '${toolName}' timed out after ${timeoutMs}ms waiting for opencode to resolve the call`,
+                  ),
+                )
+              }, timeoutMs)
+            }
             calls.emit("call", entry)
           },
         ).finally(() => {

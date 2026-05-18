@@ -18,6 +18,8 @@ export interface ClaudeCodeConfig {
   controlRequestToolBehaviors?: Record<string, ControlRequestBehavior>
   controlRequestDenyMessage?: string
   proxyTools?: string[]
+  proxyCallTimeoutMs?: number
+  proxyCallTimeoutMsByTool?: Record<string, number>
   webSearch?: WebSearchRouting
   hotReloadMcp?: boolean
   proxyOpencodeMcpTools?: boolean
@@ -120,6 +122,20 @@ export interface ClaudeCodeProviderSettings {
    * (see opencode's agent docs).
    */
   proxyTools?: string[]
+
+  /**
+   * Wait cap (ms) for any proxied tool call before the plugin gives up on
+   * opencode resolving it. This is a hang guard, not a task budget.
+   * Default 10 min; `task` defaults to 60 min. `<= 0` disables the cap.
+   */
+  proxyCallTimeoutMs?: number
+
+  /**
+   * Per-tool override of `proxyCallTimeoutMs`, keyed by bare proxy tool
+   * name (`task`, `bash`, `edit`, `write`, `webfetch`). Example:
+   * `{ "task": 0 }` removes the cap on subagent runs entirely.
+   */
+  proxyCallTimeoutMsByTool?: Record<string, number>
 
   /**
    * Routing for Claude's built-in `WebSearch` tool.
