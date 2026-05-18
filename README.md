@@ -167,6 +167,8 @@ The account model IDs are internally suffixed, for example `claude-sonnet-4-6@wo
 | `controlRequestBehavior` | `allow` \| `deny` | `allow` | Default response when `skipPermissions: false` and Claude sends a `can_use_tool` control request. |
 | `controlRequestToolBehaviors` | `Record<string, "allow" \| "deny">` | – | Per-tool override for `can_use_tool`. Example: `{ "Bash": "deny", "Read": "allow" }`. |
 | `controlRequestDenyMessage` | string | built-in message | Message returned to Claude on a deny. |
+| `proxyCallTimeoutMs` | number | `600000` (`task`: `3600000`) | Hang-guard wait cap for any proxied tool call before the plugin gives up on opencode resolving it. **Not** a task budget — only fires if the broker chain breaks. `<= 0` disables the cap. See [Proxy call timeouts](#proxy-call-timeouts). |
+| `proxyCallTimeoutMsByTool` | `Record<string, number>` | – | Per-tool override of the above, keyed by bare proxy tool name (`task`, `bash`, `edit`, `write`, `webfetch`). e.g. `{ "task": 0 }`. |
 | `bridgeOpencodeMcp` | boolean | `true` | Auto-translate your opencode `mcp` block into Claude's `--mcp-config`. See [MCP bridge](#mcp-bridge). |
 | `mcpConfig` | string \| string[] | – | Extra `--mcp-config` paths/JSON passed alongside the bridged config. |
 | `strictMcpConfig` | boolean | `false` | Pass `--strict-mcp-config` so Claude loads **only** the configured servers and ignores `~/.claude/settings.json`. |
@@ -235,6 +237,33 @@ To turn off proxying entirely:
 
 - A small per-call latency hop through `127.0.0.1:<random>/mcp`.
 - Batched-edit ergonomics: with `Edit` proxied, Claude can no longer use `MultiEdit`, so a refactor that would have been one tool call becomes N single `Edit` calls.
+
+---
+
+## Proxy call timeouts
+
+When Claude invokes a proxied tool, the call is parked until opencode runs it and returns a result. A cap exists so that if the broker chain breaks (opencode never picks the call up — listener didn't attach, host crashed between turns, a permission prompt sits unanswered) the Claude subprocess doesn't hang forever. It is a **hang guard, not a task-duration budget**.
+
+The default cap is **10 min** (matching Claude CLI's own Bash ceiling), except **`task`** which defaults to **60 min** — a proxied `task` runs an opencode *subagent*, which legitimately takes far longer than a shell command. Hitting the cap rejects the call with a timeout error even though the subagent often keeps running server-side.
+
+Tune it per provider:
+
+```json
+"provider": {
+  "claude-code": {
+    "options": {
+      "proxyCallTimeoutMs": 1800000,
+      "proxyCallTimeoutMsByTool": { "task": 0 }
+    }
+  }
+}
+```
+
+- `proxyCallTimeoutMs` — global cap for every proxied tool (ms).
+- `proxyCallTimeoutMsByTool` — per-tool override, keyed by bare proxy tool name. Wins over the global value and the built-in defaults.
+- **`<= 0` disables the cap** for that tool. Long unattended subagent runs (e.g. CI-style dispatch) usually want `{ "task": 0 }`; the call is still reclaimed when the Claude session ends, so it won't leak.
+
+Precedence: `proxyCallTimeoutMsByTool[tool]` → `proxyCallTimeoutMs` → built-in per-tool default (`task` = 60 min) → built-in default (10 min). Both internal timer layers (the proxy HTTP handler and the pending-call broker) use the same resolved value, so they can't fire out of step.
 
 ---
 
