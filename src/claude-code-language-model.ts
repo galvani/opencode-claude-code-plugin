@@ -2317,6 +2317,18 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
 
               const tc = toolCallMap.get(idx)
               if (tc) {
+                // Stale-entry guard: content_block indices restart per
+                // assistant message, but toolCallMap lives for the whole
+                // doStream. Without a delete, a later message's text/thinking
+                // block at the same idx finds a previous message's tool
+                // entry here and re-enqueues `tool-call` for the same id.
+                // opencode's SessionProcessor then re-adds it to l.toolcalls
+                // with a fresh done-promise that never settles (the real
+                // tool_result already shipped against the first emission),
+                // and the end-of-stream sweep flags it `error+interrupted` —
+                // surfacing as "Tool execution aborted" trailing an
+                // otherwise-finished turn.
+                toolCallMap.delete(idx)
                 let parsedInput: any = {}
                 try {
                   parsedInput = JSON.parse(tc.inputJson || "{}")
