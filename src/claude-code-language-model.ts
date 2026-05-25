@@ -996,13 +996,6 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
   } {
     if (isClaudeThinkingDisabled()) return {}
 
-    // Do NOT set thinkingDisplay: "summarized". On opus-4-7 the CLI strips
-    // thinking_delta events and emits summarized reasoning as regular text
-    // content — which then streams as text-delta and leaks third-person
-    // narration into the assistant's visible output (interleaved with
-    // picker/tool renderings, breaking AskUserQuestion flows). Leaving this
-    // unset routes thinking through proper `thinking` blocks, picked up by
-    // the reasoning-delta path and final-message fallback.
     return { thinking: "enabled" }
   }
 
@@ -2263,13 +2256,6 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
                 const tc = toolCallMap.get(idx)
                 if (tc) {
                   tc.inputJson += delta.partial_json
-                  // Only forward tool-input-delta for tools where we also
-                  // emitted tool-input-start (see filter ~30 lines above).
-                  // AskUserQuestion/ExitPlanMode/proxy tools render as text
-                  // instead of as opencode tool parts — forwarding deltas
-                  // without a matching start creates a phantom tool part
-                  // that opencode later flags as `error + interrupted`,
-                  // surfacing as "Tool execution aborted" in the UI.
                   const isSuppressedTool =
                     tc.name === "AskUserQuestion" ||
                     tc.name === "ask_user_question" ||
@@ -2317,17 +2303,6 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
 
               const tc = toolCallMap.get(idx)
               if (tc) {
-                // Stale-entry guard: content_block indices restart per
-                // assistant message, but toolCallMap lives for the whole
-                // doStream. Without a delete, a later message's text/thinking
-                // block at the same idx finds a previous message's tool
-                // entry here and re-enqueues `tool-call` for the same id.
-                // opencode's SessionProcessor then re-adds it to l.toolcalls
-                // with a fresh done-promise that never settles (the real
-                // tool_result already shipped against the first emission),
-                // and the end-of-stream sweep flags it `error+interrupted` —
-                // surfacing as "Tool execution aborted" trailing an
-                // otherwise-finished turn.
                 toolCallMap.delete(idx)
                 let parsedInput: any = {}
                 try {
