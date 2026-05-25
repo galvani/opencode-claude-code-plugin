@@ -2248,11 +2248,18 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
                 const tc = toolCallMap.get(idx)
                 if (tc) {
                   tc.inputJson += delta.partial_json
-                  controller.enqueue({
-                    type: "tool-input-delta",
-                    id: tc.id,
-                    delta: delta.partial_json,
-                  } as any)
+                  const isSuppressedTool =
+                    tc.name === "AskUserQuestion" ||
+                    tc.name === "ask_user_question" ||
+                    tc.name === "ExitPlanMode" ||
+                    tc.name.startsWith(PROXY_TOOL_PREFIX)
+                  if (!isSuppressedTool) {
+                    controller.enqueue({
+                      type: "tool-input-delta",
+                      id: tc.id,
+                      delta: delta.partial_json,
+                    } as any)
+                  }
                 }
               }
 
@@ -2288,6 +2295,7 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
 
               const tc = toolCallMap.get(idx)
               if (tc) {
+                toolCallMap.delete(idx)
                 let parsedInput: any = {}
                 try {
                   parsedInput = JSON.parse(tc.inputJson || "{}")
