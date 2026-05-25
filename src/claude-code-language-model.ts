@@ -909,12 +909,13 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
       } else {
         const denyMessage = isAskUserQuestionTool(toolName)
           ? "Your question and its options have already been presented to" +
-            " the operator in full. Prefer to stop here and wait for their" +
-            " answer in the next message — do not silently guess. But if" +
-            " this is an automated or otherwise non-interactive run where" +
-            " no operator will reply, do not stall: proceed with the single" +
-            " most reasonable option and state, in one line, the assumption" +
-            " you made so it can be corrected later."
+            " the operator in full. END YOUR TURN NOW: do not produce any" +
+            " more text, do not call any more tools, and do NOT guess or" +
+            " proceed on an assumption. The operator's reply will arrive as" +
+            " the next user message — wait for it. (If this run is meant to" +
+            " be non-interactive, that is configured by the operator via the" +
+            " AskUserQuestion control-behavior override, not decided here —" +
+            " so from your side, always stop and wait.)"
           : this.config.controlRequestDenyMessage ??
             `Denied by opencode-claude-code policy for tool ${toolName}`
         this.writeControlResponse(proc, requestId, {
@@ -995,13 +996,14 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
   } {
     if (isClaudeThinkingDisabled()) return {}
 
-    return {
-      thinking: "enabled",
-      thinkingDisplay:
-        process.env.CLAUDE_CODE_SHOW_THINKING_SUMMARIES === undefined
-          ? "summarized"
-          : undefined,
-    }
+    // Do NOT set thinkingDisplay: "summarized". On opus-4-7 the CLI strips
+    // thinking_delta events and emits summarized reasoning as regular text
+    // content — which then streams as text-delta and leaks third-person
+    // narration into the assistant's visible output (interleaved with
+    // picker/tool renderings, breaking AskUserQuestion flows). Leaving this
+    // unset routes thinking through proper `thinking` blocks, picked up by
+    // the reasoning-delta path and final-message fallback.
+    return { thinking: "enabled" }
   }
 
   private latestUserText(
@@ -2261,11 +2263,25 @@ export class ClaudeCodeLanguageModel implements LanguageModelV3 {
                 const tc = toolCallMap.get(idx)
                 if (tc) {
                   tc.inputJson += delta.partial_json
-                  controller.enqueue({
-                    type: "tool-input-delta",
-                    id: tc.id,
-                    delta: delta.partial_json,
-                  } as any)
+                  // Only forward tool-input-delta for tools where we also
+                  // emitted tool-input-start (see filter ~30 lines above).
+                  // AskUserQuestion/ExitPlanMode/proxy tools render as text
+                  // instead of as opencode tool parts — forwarding deltas
+                  // without a matching start creates a phantom tool part
+                  // that opencode later flags as `error + interrupted`,
+                  // surfacing as "Tool execution aborted" in the UI.
+                  const isSuppressedTool =
+                    tc.name === "AskUserQuestion" ||
+                    tc.name === "ask_user_question" ||
+                    tc.name === "ExitPlanMode" ||
+                    tc.name.startsWith(PROXY_TOOL_PREFIX)
+                  if (!isSuppressedTool) {
+                    controller.enqueue({
+                      type: "tool-input-delta",
+                      id: tc.id,
+                      delta: delta.partial_json,
+                    } as any)
+                  }
                 }
               }
 
